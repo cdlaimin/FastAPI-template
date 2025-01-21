@@ -1,15 +1,33 @@
+import os
+import enum
 from pathlib import Path
 from tempfile import gettempdir
-from typing import Optional
+from typing import List, Optional
 
-from pydantic import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
 from yarl import URL
 
 TEMP_DIR = Path(gettempdir())
 
+class LogLevel(str, enum.Enum):  # noqa: WPS600
+    """Possible log levels."""
+
+    NOTSET = "NOTSET"
+    DEBUG = "DEBUG"
+    INFO = "INFO"
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+    FATAL = "FATAL"
+
 
 class Settings(BaseSettings):
-    """Application settings."""
+    """
+    Application settings.
+
+    These parameters can be configured
+    with environment variables.
+    """
 
     host: str = "127.0.0.1"
     port: int = 8000
@@ -18,7 +36,19 @@ class Settings(BaseSettings):
     # Enable uvicorn reloading
     reload: bool = False
 
-    {%- if cookiecutter.db_info.name != "none" %}
+    # Current environment
+    environment: str = "dev"
+
+    log_level: LogLevel = LogLevel.INFO
+
+    {%- if cookiecutter.add_users == "True" %}
+    {%- if cookiecutter.orm == "sqlalchemy" %}
+    users_secret: str = os.getenv("USERS_SECRET", "")
+    {%- endif %}
+    {%- endif %}
+    {% if cookiecutter.db_info.name != "none" -%}
+
+    # Variables for the database
     {%- if cookiecutter.db_info.name == "sqlite" %}
     db_file: Path = TEMP_DIR / "db.sqlite3"
     {%- else %}
@@ -26,20 +56,79 @@ class Settings(BaseSettings):
     db_port: int = {{cookiecutter.db_info.port}}
     db_user: str = "{{cookiecutter.project_name}}"
     db_pass: str = "{{cookiecutter.project_name}}"
+    {%- if cookiecutter.db_info.name != "sqlite" %}
+    db_base: str = "admin"
+    {%- else %}
     db_base: str = "{{cookiecutter.project_name}}"
     {%- endif %}
+    {%- endif %}
     db_echo: bool = False
+
     {%- endif %}
 
+
     {%- if cookiecutter.enable_redis == "True" %}
+
+    # Variables for Redis
     redis_host: str = "{{cookiecutter.project_name}}-redis"
     redis_port: int = 6379
     redis_user: Optional[str] = None
     redis_pass: Optional[str] = None
     redis_base: Optional[int] = None
-    {% endif %}
+
+    {%- endif %}
+
+
+    {%- if cookiecutter.enable_rmq == "True" %}
+
+    # Variables for RabbitMQ
+    rabbit_host: str = "{{cookiecutter.project_name}}-rmq"
+    rabbit_port: int = 5672
+    rabbit_user: str = "guest"
+    rabbit_pass: str = "guest"
+    rabbit_vhost: str = "/"
+
+    rabbit_pool_size: int = 2
+    rabbit_channel_pool_size: int = 10
+
+    {%- endif %}
+
+
+    {%- if cookiecutter.prometheus_enabled == "True" %}
+
+    # This variable is used to define
+    # multiproc_dir. It's required for [uvi|guni]corn projects.
+    prometheus_dir: Path = TEMP_DIR / "prom"
+
+    {%- endif %}
+
+
+    {%- if cookiecutter.sentry_enabled == "True" %}
+
+    # Sentry's configuration.
+    sentry_dsn: Optional[str] = None
+    sentry_sample_rate: float = 1.0
+
+    {%- endif %}
+
+
+    {%- if cookiecutter.otlp_enabled == "True" %}
+
+    # Grpc endpoint for opentelemetry.
+    # E.G. http://localhost:4317
+    opentelemetry_endpoint: Optional[str] = None
+
+    {%- endif %}
+
+    {%- if cookiecutter.enable_kafka == "True" %}
+
+    kafka_bootstrap_servers: List[str] = ["{{cookiecutter.project_name}}-kafka:9092"]
+
+    {%- endif %}
 
     {%- if cookiecutter.db_info.name != "none" %}
+
+
     @property
     def db_url(self) -> URL:
         """
@@ -97,10 +186,30 @@ class Settings(BaseSettings):
         )
     {%- endif %}
 
-    class Config:
-        env_file = ".env"
-        env_prefix = "{{cookiecutter.project_name | upper }}_"
-        env_file_encoding = "utf-8"
+    {%- if cookiecutter.enable_rmq == "True" %}
+    @property
+    def rabbit_url(self) -> URL:
+        """
+        Assemble RabbitMQ URL from settings.
+
+        :return: rabbit URL.
+        """
+        return URL.build(
+            scheme="amqp",
+            host=self.rabbit_host,
+            port=self.rabbit_port,
+            user=self.rabbit_user,
+            password=self.rabbit_pass,
+            path=self.rabbit_vhost,
+        )
+    {%- endif %}
+
+    model_config = SettingsConfigDict(
+        env_file = ".env",
+        env_prefix = "{{cookiecutter.project_name | upper }}_",
+        env_file_encoding = "utf-8",
+    )
+
 
 
 settings = Settings()

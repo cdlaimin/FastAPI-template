@@ -1,93 +1,258 @@
-import enum
-from typing import Optional
+import abc
+from collections import UserDict
+from typing import Any, Callable, List, Optional
 
+import click
+from prompt_toolkit.shortcuts import checkboxlist_dialog, radiolist_dialog
 from pydantic import BaseModel
 
+try:
+    from simple_term_menu import TerminalMenu
+except Exception:
+    TerminalMenu = None
 
-@enum.unique
-class DatabaseType(enum.Enum):
-    none = "none"
-    sqlite = "sqlite"
-    mysql = "mysql"
-    postgresql = "postgresql"
+class BuilderContext(UserDict):
+    """Options for project generation."""
 
+    def __init__(self, **kwargs: Any) -> None:
+        self.__dict__["data"] = kwargs
 
-@enum.unique
-class CIType(enum.Enum):
-    none = "none"
-    gitlab_ci = "gitlab_ci"
-    github = "github"
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self.__dict__["data"][name]
+        except KeyError:
+            cls_name = self.__class__.__name__
+            raise AttributeError(f"'{cls_name}' object has no attribute '{name}'")
 
-@enum.unique
-class ORM(enum.Enum):
-    none = "none"
-    ormar = "ormar"
-    sqlalchemy = "sqlalchemy"
-    tortoise = "tortoise"
+    def __setattr__(self, name: str, value: Any) -> None:
+        self[name] = value
 
+    def dict(self) -> dict[str, Any]:
+        return self.__dict__["data"]
 
 class Database(BaseModel):
     name: str
-    image: Optional[str]
-    driver: Optional[str]
-    async_driver: Optional[str]
-    driver_short: Optional[str]
-    port: Optional[int]
+    image: Optional[str] = None
+    driver: Optional[str] = None
+    async_driver: Optional[str] = None
+    port: Optional[int] = None
+    driver_short: Optional[str] = None
 
 
-DB_INFO = {
-    DatabaseType.none: Database(
-        name="none",
-        image=None,
-        driver=None,
-        async_driver=None,
-        port=None,
-    ),
-    DatabaseType.postgresql: Database(
-        name=DatabaseType.postgresql.value,
-        image="postgres:13.4-buster",
-        async_driver="postgresql+asyncpg",
-        driver_short="postgres",
-        driver="postgresql",
-        port=5432,
-    ),
-    DatabaseType.mysql: Database(
-        name=DatabaseType.mysql.value,
-        image="bitnami/mysql:8.0.26",
-        async_driver="mysql+aiomysql",
-        driver_short="mysql",
-        driver="mysql",
-        port=3306,
-    ),
-    DatabaseType.sqlite: Database(
-        name=DatabaseType.sqlite.value,
-        image=None,
-        async_driver="sqlite+aiosqlite",
-        driver_short="sqlite",
-        driver="sqlite",
-        port=None,
-    ),
-}
+class MenuEntry(BaseModel):
+    code: str
+    cli_name: Optional[str] = None
+    user_view: str
+    description: str
+    is_hidden: Optional[Callable[["BuilderContext"], bool]] = None
+    additional_info: Any = None
+
+    @property
+    def generated_name(self) -> str:
+        """
+        Property to generate parameter name.
+
+        It checks if cli_name is present,
+        otherwise, code is used.
+
+        :return: string to use in CLI.
+        """
+        if self.cli_name:
+            return self.cli_name
+        return self.code
+
+SKIP_ENTRY = MenuEntry(
+    code="skip",
+    user_view="skip",
+    description="skip",
+)
 
 
-class BuilderContext(BaseModel):
-    """Options for project generation."""
+class BaseMenuModel(BaseModel, abc.ABC):
+    title: str
+    entries: List[MenuEntry]
+    description: str = ""
 
-    project_name: Optional[str]
-    kube_name: Optional[str]
-    project_description: Optional[str]
-    db: Optional[DatabaseType]
-    db_info: Optional[Database]
-    enable_redis: Optional[bool]
-    ci_type: Optional[CIType]
-    orm: Optional[ORM]
-    enable_migrations: Optional[bool]
-    enable_kube: Optional[bool]
-    enable_routers: Optional[bool]
-    add_dummy: Optional[bool] = False
-    self_hosted_swagger: Optional[bool]
-    force: bool = False
-    quite: bool = False
+    def _preview(self, current_value: str):
 
-    class Config:
-        orm_mode = True
+        for entry in self.entries:
+            if entry.user_view == current_value:
+                return entry.description
+        return "Unknown value"
+
+    @abc.abstractmethod
+    def get_cli_options(self) -> List[click.Option]:
+        pass
+
+    @abc.abstractmethod
+    def ask(self, context: "BuilderContext") -> Optional["BuilderContext"]:
+        pass
+
+    @abc.abstractmethod
+    def need_ask(self, context: "BuilderContext") -> bool:
+        pass
+
+    def after_ask(self, context: "BuilderContext") -> "BuilderContext":
+        """Function run after the menu finished work."""
+        return context
+
+
+class SingularMenuModel(BaseMenuModel):
+    code: str
+    cli_name: Optional[str] = None
+    description: str
+    before_ask_fun: Optional[Callable[["BuilderContext"], Optional[MenuEntry]]] = None
+    after_ask_fun: Optional[
+        Callable[["BuilderContext", "SingularMenuModel"], "BuilderContext"]
+    ] = None
+    parser: Optional[Callable[[str], Any]] = None
+
+    def get_cli_options(self) -> List[click.Option]:
+        cli_name = self.code
+        if self.cli_name is not None:
+            cli_name = self.cli_name
+        choices = [entry.generated_name for entry in self.entries]
+        return [
+            click.Option(
+                param_decls=[f"--{cli_name}", self.code],
+                type=click.Choice(choices, case_sensitive=False),
+                default=None,
+                help=self.description,
+            )
+        ]
+
+    def need_ask(self, context: "BuilderContext") -> bool:
+        if getattr(context, self.code, None) is None:
+            return True
+        return False
+
+    def ask(self, context: "BuilderContext") -> Optional["BuilderContext"]:
+        chosen_entry = None
+        if self.before_ask_fun is not None:
+            chosen_entry = self.before_ask_fun(context)
+
+        ctx_value = context.dict().get(self.code)
+        if ctx_value:
+            for entry in self.entries:
+                if entry.code == ctx_value:
+                    chosen_entry = entry
+
+        if not chosen_entry:
+            available_entries = []
+            for entry in self.entries:
+                if entry.is_hidden is None:
+                    available_entries.append(entry)
+                elif not entry.is_hidden(context):
+                    available_entries.append(entry)
+            if TerminalMenu is not None:
+                menu = TerminalMenu(
+                    title=self.title,
+                    menu_entries=[entry.user_view for entry in available_entries],
+                    multi_select=False,
+                    preview_title="Description",
+                    preview_command=self._preview,
+                    preview_size=0.5,
+                )
+                idx = menu.show()
+                if idx is None:
+                    return None
+
+                chosen_entry = available_entries[idx]
+            else:
+                chosen_entry = (
+                    radiolist_dialog(
+                        title=self.title,
+                        text=self.description,
+                        values=[
+                            (entry, entry.user_view) for entry in available_entries
+                        ],
+                    ).run()
+                    or SKIP_ENTRY
+                )
+
+        if chosen_entry == SKIP_ENTRY:
+            return
+
+        setattr(context, self.code, chosen_entry.code)
+
+        return context
+
+    def after_ask(self, context: "BuilderContext") -> "BuilderContext":
+        if self.after_ask_fun:
+            return self.after_ask_fun(context, self)
+        return super().after_ask(context)
+
+
+class MultiselectMenuModel(BaseMenuModel):
+    before_ask: Optional[Callable[["BuilderContext"], Optional[List[MenuEntry]]]]
+
+    def get_cli_options(self) -> List[click.Option]:
+        options = []
+        for entry in self.entries:
+            options.append(
+                click.Option(
+                    param_decls=[f"--{entry.generated_name}", entry.code],
+                    is_flag=True,
+                    help=entry.user_view,
+                    default=None,
+                )
+            )
+        return options
+
+    def need_ask(self, context: "BuilderContext") -> bool:
+        for entry in self.entries:
+            if getattr(context, entry.code, None) is None:
+                return True
+        return False
+
+    def ask(self, context: "BuilderContext") -> Optional["BuilderContext"]:
+        chosen_entries = None
+        if self.before_ask is not None:
+            chosen_entries = self.before_ask(context)
+
+        if chosen_entries is None:
+            unknown_entries = []
+            for entry in self.entries:
+                if not context.dict().get(entry.code):
+                    unknown_entries.append(entry)
+
+            visible_entries = []
+            for entry in unknown_entries:
+                if entry.is_hidden is None:
+                    visible_entries.append(entry)
+                elif not entry.is_hidden(context):
+                    visible_entries.append(entry)
+
+            if TerminalMenu is not None:
+                menu = TerminalMenu(
+                    title=self.title,
+                    menu_entries=[entry.user_view for entry in visible_entries],
+                    multi_select=True,
+                    preview_title="Description",
+                    preview_command=self._preview,
+                )
+
+                idxs = menu.show()
+
+                if idxs is None:
+                    return None
+
+                chosen_entries = []
+                for idx in idxs:
+                    chosen_entries.append(visible_entries[idx])
+            else:
+                chosen_entries = checkboxlist_dialog(
+                    title=self.title,
+                    text=self.description,
+                    values=[(entry, entry.user_view) for entry in visible_entries],
+                ).run() or [SKIP_ENTRY]
+
+        if chosen_entries == [SKIP_ENTRY]:
+            return context
+
+        for entry in chosen_entries:
+            setattr(context, entry.code, True)
+        
+        return context
+
+
