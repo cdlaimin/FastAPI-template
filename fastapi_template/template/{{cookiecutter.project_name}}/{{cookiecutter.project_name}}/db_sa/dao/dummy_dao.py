@@ -1,8 +1,8 @@
 from typing import List, Optional
+
 from fastapi import Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from {{cookiecutter.project_name}}.db.dependencies import get_db_session
 from {{cookiecutter.project_name}}.db.models.dummy_model import DummyModel
 
@@ -10,7 +10,7 @@ from {{cookiecutter.project_name}}.db.models.dummy_model import DummyModel
 class DummyDAO:
     """Class for accessing dummy table."""
 
-    def __init__(self, session: AsyncSession = Depends(get_db_session)):
+    def __init__(self, session: AsyncSession = Depends(get_db_session)) -> None:
         self.session = session
 
     async def create_dummy_model(self, name: str) -> None:
@@ -33,7 +33,7 @@ class DummyDAO:
             select(DummyModel).limit(limit).offset(offset),
         )
 
-        return raw_dummies.scalars().fetchall()
+        return list(raw_dummies.scalars().fetchall())
 
     async def filter(
         self,
@@ -49,4 +49,4 @@ class DummyDAO:
         if name:
             query = query.where(DummyModel.name == name)
         rows = await self.session.execute(query)
-        return rows.scalars().fetchall()
+        return list(rows.scalars().fetchall())

@@ -1,12 +1,13 @@
 import os
+
+from pathlib import Path
 from sqlalchemy import text
-from sqlalchemy.engine import URL, make_url
-from sqlalchemy.engine import create_engine
+from sqlalchemy.engine import URL, create_engine, make_url
 from {{cookiecutter.project_name}}.settings import settings
 
 {% if cookiecutter.db_info.name == "postgresql" -%}
 def create_database() -> None:
-    """Create a databse."""
+    """Create a database."""
     db_url = make_url(str(settings.db_url.with_path('/postgres')))
     engine = create_engine(db_url, isolation_level="AUTOCOMMIT")
 
@@ -46,7 +47,7 @@ def drop_database() -> None:
 {%- endif %}
 {%- if cookiecutter.db_info.name == "mysql" %}
 def create_database() -> None:
-    """Create a databse."""
+    """Create a database."""
     engine = create_engine(str(settings.db_url.with_path("/mysql")))
 
     with engine.connect() as conn:
@@ -76,11 +77,12 @@ def drop_database() -> None:
 {%- endif %}
 {%- if cookiecutter.db_info.name == "sqlite" %}
 def create_database() -> None:
-    """Create a databse."""
+    """Create a database."""
+    drop_database()
+    Path(settings.db_file).touch()
 
 def drop_database() -> None:
     """Drop current database."""
-    if settings.db_file.exists():
-        os.remove(settings.db_file)
+    Path(settings.db_file).unlink(missing_ok=True)
 
 {%- endif %}
